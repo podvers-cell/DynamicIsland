@@ -13,6 +13,9 @@ A Dynamic Island–style music player that lives in the MacBook notch.
 - Hover to expand: title, artist, progress bar (click or drag to seek), previous / play-pause / next.
 - Visualizer bars react to the real audio coming out of your Mac (5 frequency bands).
 - Lock animation in the notch when you unlock your Mac.
+- Every open player shows up as an icon (like Control Center's Now Playing): click one to pause the others and play it.
+- Click the artwork to open the playing app, or the exact browser tab that plays.
+- Hover feedback on every control.
 - Opens at login (toggle from the right-click menu).
 
 ## Install
@@ -26,6 +29,12 @@ A Dynamic Island–style music player that lives in the MacBook notch.
    xattr -cr /Applications/DynamicIsland.app
    ```
 4. Allow **System Audio Recording** when asked, so the visualizer can move with the music.
+5. Allow DynamicIsland to control **Spotify**, **Music** and your browser when asked
+   (System Settings → Privacy & Security → Automation), for switching players and opening tabs.
+
+Optional: to resume a browser video from the island after another player took over, enable
+Chrome's **View → Developer → Allow JavaScript from Apple Events**. Note that this lets any app
+you allowed to control Chrome run scripts in your pages. Without it, the island opens the tab instead.
 
 Right-click the island for **Open at Login** and **Quit**.
 
@@ -45,6 +54,8 @@ swift make-icon.swift   # regenerate AppIcon.icns after editing the icon
 
 - Now playing info and media controls: [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter)
   (vendored in `vendor/`, BSD 3-Clause), which keeps working on macOS 15.4+.
+- All now playing sessions: `island/island.m`, built into the same framework and run through `/usr/bin/perl`.
+  macOS only routes media commands to the elected app, so other players are controlled over AppleScript.
 - Visualizer: a Core Audio process tap on system output, FFT with Accelerate.
 - UI: a borderless SwiftUI panel positioned over the notch. Everything is in `main.swift`.
 
