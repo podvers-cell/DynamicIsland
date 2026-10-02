@@ -2,6 +2,8 @@
 
 A Dynamic Island–style music player that lives in the MacBook notch.
 
+![DynamicIsland: compact and expanded](docs/screenshot.png)
+
 ![icon](https://github.com/podvers-cell/DynamicIsland/raw/main/docs/icon.png)
 
 ## Features
