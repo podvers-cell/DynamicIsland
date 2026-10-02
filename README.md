@@ -45,3 +45,7 @@ swift make-icon.swift   # regenerate AppIcon.icns after editing the icon
   (vendored in `vendor/`, BSD 3-Clause), which keeps working on macOS 15.4+.
 - Visualizer: a Core Audio process tap on system output, FFT with Accelerate.
 - UI: a borderless SwiftUI panel positioned over the notch. Everything is in `main.swift`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). `vendor/mediaremote-adapter` keeps its own BSD 3-Clause license.
