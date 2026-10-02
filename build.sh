@@ -20,6 +20,7 @@ cat > $APP/Contents/Info.plist <<EOF
   <key>LSMinimumSystemVersion</key><string>$MIN_OS</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>Show and control Spotify or Music when another app holds Now Playing.</string>
   <key>NSAudioCaptureUsageDescription</key><string>Animate the visualizer to the music that is playing.</string>
 </dict></plist>
 EOF

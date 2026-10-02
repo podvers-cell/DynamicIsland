@@ -8,6 +8,7 @@ struct Track: Equatable {
     var bundle = "", title = "", artist = "", playing = false
     var art: NSImage?
     var duration = 0.0, elapsed = 0.0, stamp = Date()
+    var scriptApp: String?  // "Spotify" / "Music" when this came from AppleScript instead of MediaRemote
 
     func elapsed(at now: Date) -> Double {
         min(duration, playing ? elapsed + now.timeIntervalSince(stamp) : elapsed)
@@ -15,13 +16,47 @@ struct Track: Equatable {
 }
 
 // Now playing for every app (Spotify, Music, browsers...) via mediaremote-adapter.
+// MediaRemote reports only one app: the last one that claimed "now playing". A paused
+// YouTube tab can keep that slot while Spotify plays, so when MediaRemote's app is not
+// playing we also ask Spotify and Music directly and show whichever is actually playing.
 final class Player: ObservableObject {
-    @Published var track: Track?
+    @Published private(set) var track: Track?
+    private var remote: Track? { didSet { pick() } }
+    private var scripted: Track? { didSet { pick() } }
     private let res = Bundle.main.resourcePath ?? "."
     private var proc: Process?
     private var pending = Data()
+    private let scriptQueue = DispatchQueue(label: "applescript")
+    private var script: NSAppleScript?
+    private var artCache: (url: String, image: NSImage)?
 
-    init() { start() }
+    private let source = """
+    set d to character id 31
+    try
+      if application "Spotify" is running then
+        tell application "Spotify"
+          if player state is playing then return "Spotify" & d & (name of current track) & d & (artist of current track) & d & (artwork url of current track) & d & ((duration of current track) / 1000) & d & player position
+        end tell
+      end if
+    end try
+    try
+      if application "Music" is running then
+        tell application "Music"
+          if player state is playing then return "Music" & d & (name of current track) & d & (artist of current track) & d & "" & d & (duration of current track) & d & player position
+        end tell
+      end if
+    end try
+    return ""
+    """
+
+    init() {
+        start()
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.poll() }
+    }
+
+    private func pick() {
+        track = remote?.playing == true ? remote : (scripted ?? remote)
+    }
 
     private func adapter(_ args: [String]) -> Process {
         let p = Process()
@@ -50,7 +85,7 @@ final class Player: ObservableObject {
             guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                   let p = obj["payload"] as? [String: Any] else { continue }
             let t = Self.parse(p)
-            DispatchQueue.main.async { self.track = t }
+            DispatchQueue.main.async { self.remote = t }
         }
     }
 
@@ -64,12 +99,56 @@ final class Player: ObservableObject {
         return t
     }
 
+    // Only needed while MediaRemote's app is not playing.
+    private func poll() {
+        guard remote?.playing != true else {
+            if scripted != nil { scripted = nil }
+            return
+        }
+        scriptQueue.async {
+            if self.script == nil { self.script = NSAppleScript(source: self.source) }
+            let out = self.script?.executeAndReturnError(nil).stringValue ?? ""
+            let t = self.parseScript(out)
+            DispatchQueue.main.async { self.scripted = t }
+        }
+    }
+
+    // Runs on scriptQueue.
+    private func parseScript(_ out: String) -> Track? {
+        let p = out.components(separatedBy: "\u{1F}")
+        guard p.count == 6 else { return nil }
+        let num = { (s: String) in Double(s.replacingOccurrences(of: ",", with: ".")) ?? 0 }
+        var t = Track(bundle: p[0] == "Spotify" ? "com.spotify.client" : "com.apple.Music",
+                      title: p[1], artist: p[2], playing: true, scriptApp: p[0])
+        t.duration = num(p[4]); t.elapsed = num(p[5])
+        if !p[3].isEmpty, let url = URL(string: p[3]) {
+            if artCache?.url != p[3], let d = try? Data(contentsOf: url), let img = NSImage(data: d) { artCache = (p[3], img) }
+            t.art = artCache?.url == p[3] ? artCache?.image : nil
+        }
+        return t
+    }
+
+    private func tell(_ app: String, _ cmd: String) {
+        scriptQueue.async { NSAppleScript(source: "tell application \"\(app)\" to \(cmd)")?.executeAndReturnError(nil) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.poll() }
+    }
+
     // 2 = toggle play/pause, 4 = next, 5 = previous
-    func send(_ id: Int) { try? adapter(["send", "\(id)"]).run() }
+    func send(_ id: Int) {
+        if let app = track?.scriptApp {
+            tell(app, [2: "playpause", 4: "next track", 5: "previous track"][id] ?? "playpause")
+        } else {
+            try? adapter(["send", "\(id)"]).run()
+        }
+    }
 
     func seek(to seconds: Double) {
-        try? adapter(["seek", "\(Int(seconds * 1e6))"]).run()
-        track?.elapsed = seconds  // move the bar now; the stream confirms shortly
+        if let app = track?.scriptApp {
+            tell(app, "set player position to \(seconds)")
+        } else {
+            try? adapter(["seek", "\(Int(seconds * 1e6))"]).run()
+        }
+        track?.elapsed = seconds  // move the bar now; the next update confirms
         track?.stamp = Date()
     }
 }
