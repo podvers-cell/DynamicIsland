@@ -332,14 +332,17 @@ struct Artwork: View {
     let track: Track
     let size: CGFloat
     var onTap: () -> Void = {}
+    // A Button, not onTapGesture: tap gestures miss clicks in this non-activating panel.
     var body: some View {
-        Image(nsImage: track.art ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: track.bundle)
-            .map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage())
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: size / 4))
-            .onTapGesture(perform: onTap)
+        Button(action: onTap) {
+            Image(nsImage: track.art ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: track.bundle)
+                .map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage())
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size / 4))
+        }
+        .buttonStyle(.plain)
     }
 }
 
