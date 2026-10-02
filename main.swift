@@ -16,37 +16,40 @@ struct Track: Equatable {
 }
 
 // Now playing for every app (Spotify, Music, browsers...) via mediaremote-adapter.
-// MediaRemote reports only one app: the last one that claimed "now playing". A paused
-// YouTube tab can keep that slot while Spotify plays, so when MediaRemote's app is not
-// playing we also ask Spotify and Music directly and show whichever is actually playing.
+// MediaRemote reports only one app: the last one that claimed "now playing" (often a
+// browser tab). Spotify and Music are also read over AppleScript, so every open player
+// shows up as a source the user can switch to from the island.
 final class Player: ObservableObject {
     @Published private(set) var track: Track?
+    @Published private(set) var sources: [Track] = []
     private var remote: Track? { didSet { pick() } }
-    private var scripted: Track? { didSet { pick() } }
+    private var scripted: [Track] = [] { didSet { pick() } }
+    private var selected: String?  // bundle the user picked; nil = follow whatever plays
     private let res = Bundle.main.resourcePath ?? "."
     private var proc: Process?
     private var pending = Data()
     private let scriptQueue = DispatchQueue(label: "applescript")
     private var script: NSAppleScript?
-    private var artCache: (url: String, image: NSImage)?
+    private var artCache: [String: NSImage] = [:]
 
     private let source = """
     set d to character id 31
+    set out to ""
     try
       if application "Spotify" is running then
         tell application "Spotify"
-          if player state is playing then return "Spotify" & d & (name of current track) & d & (artist of current track) & d & (artwork url of current track) & d & ((duration of current track) / 1000) & d & player position
+          if player state is not stopped then set out to out & "Spotify" & d & (name of current track) & d & (artist of current track) & d & (artwork url of current track) & d & ((duration of current track) / 1000) & d & player position & d & (player state as text) & (character id 30)
         end tell
       end if
     end try
     try
       if application "Music" is running then
         tell application "Music"
-          if player state is playing then return "Music" & d & (name of current track) & d & (artist of current track) & d & "" & d & (duration of current track) & d & player position
+          if player state is not stopped then set out to out & "Music" & d & (name of current track) & d & (artist of current track) & d & "" & d & (duration of current track) & d & player position & d & (player state as text) & (character id 30)
         end tell
       end if
     end try
-    return ""
+    return out
     """
 
     init() {
@@ -55,7 +58,15 @@ final class Player: ObservableObject {
     }
 
     private func pick() {
-        track = remote?.playing == true ? remote : (scripted ?? remote)
+        // If MediaRemote already tracks Spotify/Music, keep its richer copy and drop the AppleScript one.
+        let list = (remote.map { [$0] } ?? []) + scripted.filter { $0.bundle != remote?.bundle }
+        sources = list
+        let playing = list.first { $0.playing }
+        if let sel = list.first(where: { $0.bundle == selected }), sel.playing || playing == nil {
+            track = sel
+        } else {
+            track = playing ?? remote ?? list.first
+        }
     }
 
     private func adapter(_ args: [String]) -> Process {
@@ -99,47 +110,53 @@ final class Player: ObservableObject {
         return t
     }
 
-    // Only needed while MediaRemote's app is not playing.
     private func poll() {
-        guard remote?.playing != true else {
-            if scripted != nil { scripted = nil }
-            return
-        }
         scriptQueue.async {
             if self.script == nil { self.script = NSAppleScript(source: self.source) }
             let out = self.script?.executeAndReturnError(nil).stringValue ?? ""
-            let t = self.parseScript(out)
-            DispatchQueue.main.async { self.scripted = t }
+            let list = out.components(separatedBy: "\u{1E}").compactMap(self.parseScript)
+            DispatchQueue.main.async { if self.scripted != list { self.scripted = list } }
         }
     }
 
     // Runs on scriptQueue.
-    private func parseScript(_ out: String) -> Track? {
-        let p = out.components(separatedBy: "\u{1F}")
-        guard p.count == 6 else { return nil }
+    private func parseScript(_ rec: String) -> Track? {
+        let p = rec.components(separatedBy: "\u{1F}")
+        guard p.count == 7 else { return nil }
         let num = { (s: String) in Double(s.replacingOccurrences(of: ",", with: ".")) ?? 0 }
         var t = Track(bundle: p[0] == "Spotify" ? "com.spotify.client" : "com.apple.Music",
-                      title: p[1], artist: p[2], playing: true, scriptApp: p[0])
+                      title: p[1], artist: p[2], playing: p[6] == "playing", scriptApp: p[0])
         t.duration = num(p[4]); t.elapsed = num(p[5])
         if !p[3].isEmpty, let url = URL(string: p[3]) {
-            if artCache?.url != p[3], let d = try? Data(contentsOf: url), let img = NSImage(data: d) { artCache = (p[3], img) }
-            t.art = artCache?.url == p[3] ? artCache?.image : nil
+            if artCache[p[3]] == nil, let d = try? Data(contentsOf: url), let img = NSImage(data: d) { artCache[p[3]] = img }
+            t.art = artCache[p[3]]
         }
         return t
     }
 
     private func tell(_ app: String, _ cmd: String) {
         scriptQueue.async { NSAppleScript(source: "tell application \"\(app)\" to \(cmd)")?.executeAndReturnError(nil) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.poll() }
     }
 
-    // 2 = toggle play/pause, 4 = next, 5 = previous
-    func send(_ id: Int) {
-        if let app = track?.scriptApp {
-            tell(app, [2: "playpause", 4: "next track", 5: "previous track"][id] ?? "playpause")
+    // MediaRemote command ids: 0 = play, 1 = pause, 2 = toggle, 4 = next, 5 = previous
+    private func command(_ t: Track, _ id: Int) {
+        if let app = t.scriptApp {
+            tell(app, [0: "play", 1: "pause", 2: "playpause", 4: "next track", 5: "previous track"][id] ?? "playpause")
         } else {
             try? adapter(["send", "\(id)"]).run()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.poll() }
+    }
+
+    func send(_ id: Int) { if let t = track { command(t, id) } }
+
+    // Switch from the island: pause whatever else plays, play the picked source.
+    func switchTo(_ bundle: String) {
+        guard let target = sources.first(where: { $0.bundle == bundle }) else { return }
+        selected = bundle
+        for s in sources where s.playing && s.bundle != bundle { command(s, 1) }
+        if !target.playing { command(target, 0) }
+        pick()
     }
 
     func seek(to seconds: Double) {
@@ -412,15 +429,39 @@ struct Island: View {
                 Bars(levels: levels, playing: t.playing)
             }
             if t.duration > 0 { Progress(track: t) { player.seek(to: $0) } }
-            HStack(spacing: 28) {
-                button("backward.fill", 5)
-                button(t.playing ? "pause.fill" : "play.fill", 2)
-                button("forward.fill", 4)
+            ZStack {
+                HStack(spacing: 28) {
+                    button("backward.fill", 5)
+                    button(t.playing ? "pause.fill" : "play.fill", 2)
+                    button("forward.fill", 4)
+                }
+                if player.sources.count > 1 {
+                    HStack(spacing: 6) {
+                        Spacer()
+                        ForEach(player.sources, id: \.bundle) { s in sourceChip(s, current: s.bundle == t.bundle) }
+                    }
+                }
             }
         }
         .padding(.top, notchH + 2)
         .padding([.horizontal, .bottom], 14)
         .frame(width: max(notchW + 120, 320))
+    }
+
+    // App icon to switch playback to that player; green dot = playing.
+    func sourceChip(_ s: Track, current: Bool) -> some View {
+        Button { player.switchTo(s.bundle) } label: {
+            Image(nsImage: NSWorkspace.shared.urlForApplication(withBundleIdentifier: s.bundle)
+                .map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage())
+                .resizable()
+                .frame(width: 18, height: 18)
+                .opacity(current ? 1 : 0.45)
+                .overlay(alignment: .bottomTrailing) {
+                    if s.playing { Circle().fill(.green).frame(width: 6, height: 6) }
+                }
+        }
+        .buttonStyle(.plain)
+        .help(s.title)
     }
 
     func button(_ icon: String, _ cmd: Int) -> some View {
