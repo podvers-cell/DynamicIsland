@@ -157,11 +157,13 @@ final class Player: ObservableObject {
         let browsers = ["com.google.Chrome": "Google Chrome", "com.brave.Browser": "Brave Browser",
                         "com.microsoft.edgemac": "Microsoft Edge", "com.apple.Safari": "Safari"]
         guard let app = browsers[t.bundle] else {
+            // Re-opening a running app also restores its minimized windows.
             NSWorkspace.shared.openApplication(at: url, configuration: .init())
             return
         }
         let title = String(t.title.prefix(40)).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let pickTab = app == "Safari" ? "set current tab of w to tb" : "set active tab index of w to i"
+        let restore = app == "Safari" ? "set miniaturized of w to false" : "set minimized of w to false"
         let src = """
         tell application "\(app)"
           repeat with w in windows
@@ -170,6 +172,7 @@ final class Player: ObservableObject {
               set i to i + 1
               if name of tb contains "\(title)" then
                 \(pickTab)
+                \(restore)
                 set index of w to 1
                 activate
                 return
@@ -342,7 +345,7 @@ struct Artwork: View {
                 .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: size / 4))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Hover())
     }
 }
 
@@ -350,6 +353,7 @@ struct Progress: View {
     let track: Track
     let onSeek: (Double) -> Void
     @State private var drag: Double?  // fraction while dragging
+    @State private var hover = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.5)) { ctx in
@@ -358,11 +362,12 @@ struct Progress: View {
                 Text(Self.fmt(e))
                 GeometryReader { g in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(.white.opacity(0.2)).frame(height: drag == nil ? 4 : 6)
-                        Capsule().fill(.white).frame(width: g.size.width * CGFloat(e / track.duration), height: drag == nil ? 4 : 6)
+                        Capsule().fill(.white.opacity(0.2)).frame(height: drag == nil && !hover ? 4 : 6)
+                        Capsule().fill(.white).frame(width: g.size.width * CGFloat(e / track.duration), height: drag == nil && !hover ? 4 : 6)
                     }
                     .frame(maxHeight: .infinity)
                     .contentShape(Rectangle())
+                    .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hover = h } }
                     .gesture(DragGesture(minimumDistance: 0)
                         .onChanged { drag = min(1, max(0, $0.location.x / g.size.width)) }
                         .onEnded { _ in
@@ -497,13 +502,32 @@ struct Island: View {
                     if s.playing { Circle().fill(.green).frame(width: 6, height: 6) }
                 }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Hover())
         .help(s.title)
     }
 
     func button(_ icon: String, _ cmd: Int) -> some View {
         Button { player.send(cmd) } label: { Image(systemName: icon).font(.title3).foregroundStyle(.white) }
-            .buttonStyle(.plain)
+            .buttonStyle(Hover())
+    }
+}
+
+// Grows on hover and shrinks on press, so every control in the island feels clickable.
+struct Hover: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { HoverBody(configuration: configuration) }
+
+    struct HoverBody: View {
+        let configuration: Configuration
+        @State private var hover = false
+        var body: some View {
+            configuration.label
+                .scaleEffect(configuration.isPressed ? 0.88 : hover ? 1.12 : 1)
+                .brightness(hover ? 0.12 : 0)
+                .animation(.spring(response: 0.25, dampingFraction: 0.6), value: hover)
+                .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
+                .contentShape(Rectangle())
+                .onHover { hover = $0 }
+        }
     }
 }
 
