@@ -89,7 +89,35 @@ final class Levels: ObservableObject {
     private lazy var dft = try! vDSP.DiscreteFourierTransform(count: n, direction: .forward, transformType: .complexComplex, ofType: Float.self)
     private let queue = DispatchQueue(label: "levels", qos: .userInteractive)
 
-    init() { start() }
+    // Live tap objects, torn down and rebuilt when the output device changes.
+    private var tap = AudioObjectID(kAudioObjectUnknown)
+    private var dev = AudioObjectID(kAudioObjectUnknown)
+    private var procID: AudioDeviceIOProcID?
+
+    init() {
+        queue.async { self.start() }
+        // The aggregate device is clocked by the output device, so switching to headphones,
+        // AirPods or an audio driver like eqMac silently stops input. Rebuild on every switch and on wake.
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, queue) { [weak self] _, _ in self?.restart() }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.queue.asyncAfter(deadline: .now() + 1) { self?.restart() }
+        }
+    }
+
+    // Runs on `queue`.
+    private func restart() {
+        if let procID {
+            AudioDeviceStop(dev, procID)
+            AudioDeviceDestroyIOProcID(dev, procID)
+        }
+        if dev != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(dev) }
+        if tap != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tap) }
+        procID = nil; dev = AudioObjectID(kAudioObjectUnknown); tap = AudioObjectID(kAudioObjectUnknown)
+        buf.removeAll()
+        start()
+    }
 
     private func get<T>(_ obj: AudioObjectID, _ sel: AudioObjectPropertySelector, _ value: inout T) {
         var addr = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
@@ -97,11 +125,10 @@ final class Levels: ObservableObject {
         _ = withUnsafeMutablePointer(to: &value) { AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, $0) }
     }
 
-    // ponytail: aggregate is bound to the output device at launch; rebuild on device change if switching headphones breaks it
+    // Runs on `queue`.
     private func start() {
         let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         desc.isPrivate = true
-        var tap = AudioObjectID(kAudioObjectUnknown)
         guard AudioHardwareCreateProcessTap(desc, &tap) == noErr else { return }
 
         var fmt = AudioStreamBasicDescription()
@@ -109,7 +136,7 @@ final class Levels: ObservableObject {
         if fmt.mSampleRate > 0 { sampleRate = Float(fmt.mSampleRate) }
 
         var out = AudioObjectID(kAudioObjectUnknown)
-        get(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultSystemOutputDevice, &out)
+        get(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, &out)
         var uid: Unmanaged<CFString>?
         get(out, kAudioDevicePropertyDeviceUID, &uid)
         let outUID = uid?.takeRetainedValue() as String? ?? ""
@@ -124,10 +151,8 @@ final class Levels: ObservableObject {
             kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outUID]],
             kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: true, kAudioSubTapUIDKey: desc.uuid.uuidString]],
         ]
-        var dev = AudioObjectID(kAudioObjectUnknown)
         guard AudioHardwareCreateAggregateDevice(agg as CFDictionary, &dev) == noErr else { return }
 
-        var procID: AudioDeviceIOProcID?
         AudioDeviceCreateIOProcIDWithBlock(&procID, dev, queue) { [weak self] _, input, _, _, _ in
             guard let self, let first = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input)).first,
                   let data = first.mData else { return }
@@ -167,10 +192,10 @@ struct Bars: View {
     var body: some View {
         HStack(spacing: 2) {
             ForEach(0..<levels.bands.count, id: \.self) { i in
-                Capsule().fill(.green).frame(width: 3, height: 3 + 13 * CGFloat(playing ? levels.bands[i] : 0))
+                Capsule().fill(.green).frame(width: 2.5, height: 2.5 + 9.5 * CGFloat(playing ? levels.bands[i] : 0))
             }
         }
-        .frame(height: 16)
+        .frame(height: 12)
         .animation(.linear(duration: 0.06), value: levels.bands)
     }
 }
@@ -271,7 +296,7 @@ struct Island: View {
             } else if let t = player.track {
                 Group { open ? AnyView(expanded(t)) : AnyView(compact(t)) }
                     .background(Color.black)
-                    .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: open ? 28 : 10, bottomTrailingRadius: open ? 28 : 10))
+                    .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: open ? 22 : 10, bottomTrailingRadius: open ? 22 : 10))
                     .onHover { h in withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { open = h } }
                     .contextMenu {
                         let login = SMAppService.mainApp
@@ -288,39 +313,39 @@ struct Island: View {
 
     func compact(_ t: Track) -> some View {
         HStack {
-            Artwork(track: t, size: 20)
+            Artwork(track: t, size: 16)
             Spacer()
             Bars(levels: levels, playing: t.playing)
         }
-        .padding(.horizontal, 12)
-        .frame(width: notchW + 90, height: notchH)
+        .padding(.horizontal, 10)
+        .frame(width: notchW + 60, height: notchH)
     }
 
     func expanded(_ t: Track) -> some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Artwork(track: t, size: 56)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(t.title).font(.headline).foregroundStyle(.white).lineLimit(1)
-                    Text(t.artist).font(.subheadline).foregroundStyle(.gray).lineLimit(1)
+        VStack(spacing: 9) {
+            HStack(spacing: 10) {
+                Artwork(track: t, size: 42)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(t.title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
+                    Text(t.artist).font(.caption).foregroundStyle(.gray).lineLimit(1)
                 }
                 Spacer()
                 Bars(levels: levels, playing: t.playing)
             }
             if t.duration > 0 { Progress(track: t) { player.seek(to: $0) } }
-            HStack(spacing: 36) {
+            HStack(spacing: 28) {
                 button("backward.fill", 5)
                 button(t.playing ? "pause.fill" : "play.fill", 2)
                 button("forward.fill", 4)
             }
         }
-        .padding(.top, notchH + 4)
-        .padding([.horizontal, .bottom], 20)
-        .frame(width: max(notchW + 180, 400))
+        .padding(.top, notchH + 2)
+        .padding([.horizontal, .bottom], 14)
+        .frame(width: max(notchW + 120, 320))
     }
 
     func button(_ icon: String, _ cmd: Int) -> some View {
-        Button { player.send(cmd) } label: { Image(systemName: icon).font(.title2).foregroundStyle(.white) }
+        Button { player.send(cmd) } label: { Image(systemName: icon).font(.title3).foregroundStyle(.white) }
             .buttonStyle(.plain)
     }
 }
