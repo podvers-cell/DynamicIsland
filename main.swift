@@ -336,26 +336,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let unlock = Unlock()
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        let screen = NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main!
-        let notchH = max(screen.safeAreaInsets.top, 24)
-        let notchW = screen.frame.width - (screen.auxiliaryTopLeftArea?.width ?? screen.frame.width / 2 - 100)
-                                        - (screen.auxiliaryTopRightArea?.width ?? screen.frame.width / 2 - 100)
-        let w: CGFloat = 600, h: CGFloat = 240
-        panel = NSPanel(contentRect: NSRect(x: screen.frame.midX - w / 2, y: screen.frame.maxY - h, width: w, height: h),
-                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-        panel.contentView = Host(rootView: Island(player: player, unlock: unlock, levels: levels, notchW: notchW, notchH: notchH))
+        layout()
         panel.orderFrontRegardless()
+
+        // Screen coordinates are relative to the main display, so plugging in a monitor,
+        // changing which display is main, resolution changes or wake from sleep move the
+        // notch to new coordinates. Re-anchor every time the display setup changes.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.layout()
+        }
 
         // Open at login on first run only, so turning it off in System Settings sticks.
         if !UserDefaults.standard.bool(forKey: "loginItemSet") {
             try? SMAppService.mainApp.register()
             UserDefaults.standard.set(true, forKey: "loginItemSet")
         }
+    }
+
+    // Pin the panel to the top center of the notch screen (or the menu bar screen if there is no notch, e.g. lid closed).
+    func layout() {
+        guard let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.screens.first else { return }
+        let notchH = max(screen.safeAreaInsets.top, 24)
+        let notchW = screen.frame.width - (screen.auxiliaryTopLeftArea?.width ?? screen.frame.width / 2 - 100)
+                                        - (screen.auxiliaryTopRightArea?.width ?? screen.frame.width / 2 - 100)
+        let w: CGFloat = 600, h: CGFloat = 240
+        panel.setFrame(NSRect(x: screen.frame.midX - w / 2, y: screen.frame.maxY - h, width: w, height: h), display: true)
+        panel.contentView = Host(rootView: Island(player: player, unlock: unlock, levels: levels, notchW: notchW, notchH: notchH))
     }
 }
 
