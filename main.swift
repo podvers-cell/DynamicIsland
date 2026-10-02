@@ -244,10 +244,15 @@ final class Player: ObservableObject {
           return "none"
         end tell
         """
+        // Report once: the script result, or failure after 1.5s if it is stuck
+        // (e.g. waiting on an Automation permission prompt).
+        var reported = false
+        let report = { (ok: Bool) in if !reported { reported = true; done?(ok) } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { report(false) }
         actionQueue.async {
             var err: NSDictionary?
             let r = NSAppleScript(source: src)?.executeAndReturnError(&err).stringValue
-            DispatchQueue.main.async { done?(err == nil && r == "ok") }
+            DispatchQueue.main.async { report(err == nil && r == "ok") }
         }
     }
 
