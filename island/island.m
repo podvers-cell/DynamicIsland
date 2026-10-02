@@ -100,6 +100,7 @@ void island_sessions(void) {
             fflush(stdout);
         }
         sleep(1);
+        if (getppid() == 1) exit(0);  // the app quit or crashed: don't linger as an orphan
     }
 }
 
