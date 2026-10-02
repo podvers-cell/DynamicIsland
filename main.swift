@@ -94,7 +94,7 @@ final class Levels: ObservableObject {
     private func get<T>(_ obj: AudioObjectID, _ sel: AudioObjectPropertySelector, _ value: inout T) {
         var addr = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var size = UInt32(MemoryLayout<T>.size)
-        AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &value)
+        _ = withUnsafeMutablePointer(to: &value) { AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, $0) }
     }
 
     // ponytail: aggregate is bound to the output device at launch; rebuild on device change if switching headphones breaks it
