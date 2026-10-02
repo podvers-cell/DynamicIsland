@@ -29,6 +29,9 @@ final class Player: ObservableObject {
     private var proc: Process?
     private var pending = Data()
     private let scriptQueue = DispatchQueue(label: "applescript")
+    // Separate queue: a poll stuck on a pending permission prompt must not block user actions.
+    private let actionQueue = DispatchQueue(label: "applescript-actions")
+    private var polling = false
     private var script: NSAppleScript?
     private var artCache: [String: NSImage] = [:]
 
@@ -111,11 +114,16 @@ final class Player: ObservableObject {
     }
 
     private func poll() {
+        guard !polling else { return }  // previous poll still running (e.g. waiting on a permission prompt)
+        polling = true
         scriptQueue.async {
             if self.script == nil { self.script = NSAppleScript(source: self.source) }
             let out = self.script?.executeAndReturnError(nil).stringValue ?? ""
             let list = out.components(separatedBy: "\u{1E}").compactMap(self.parseScript)
-            DispatchQueue.main.async { if self.scripted != list { self.scripted = list } }
+            DispatchQueue.main.async {
+                self.polling = false
+                if self.scripted != list { self.scripted = list }
+            }
         }
     }
 
@@ -135,7 +143,7 @@ final class Player: ObservableObject {
     }
 
     private func tell(_ app: String, _ cmd: String) {
-        scriptQueue.async { NSAppleScript(source: "tell application \"\(app)\" to \(cmd)")?.executeAndReturnError(nil) }
+        actionQueue.async { NSAppleScript(source: "tell application \"\(app)\" to \(cmd)")?.executeAndReturnError(nil) }
     }
 
     // MediaRemote command ids: 0 = play, 1 = pause, 2 = toggle, 4 = next, 5 = previous
@@ -156,11 +164,9 @@ final class Player: ObservableObject {
         guard let t = track, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: t.bundle) else { return }
         let browsers = ["com.google.Chrome": "Google Chrome", "com.brave.Browser": "Brave Browser",
                         "com.microsoft.edgemac": "Microsoft Edge", "com.apple.Safari": "Safari"]
-        guard let app = browsers[t.bundle] else {
-            // Re-opening a running app also restores its minimized windows.
-            NSWorkspace.shared.openApplication(at: url, configuration: .init())
-            return
-        }
+        // Bring the app up right away; re-opening a running app also restores minimized windows.
+        NSWorkspace.shared.openApplication(at: url, configuration: .init())
+        guard let app = browsers[t.bundle] else { return }
         let title = String(t.title.prefix(40)).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let pickTab = app == "Safari" ? "set current tab of w to tb" : "set active tab index of w to i"
         let restore = app == "Safari" ? "set miniaturized of w to false" : "set minimized of w to false"
@@ -182,7 +188,7 @@ final class Player: ObservableObject {
           activate
         end tell
         """
-        scriptQueue.async { NSAppleScript(source: src)?.executeAndReturnError(nil) }
+        actionQueue.async { NSAppleScript(source: src)?.executeAndReturnError(nil) }
     }
 
     // Switch from the island: pause whatever else plays, play the picked source.
@@ -521,8 +527,8 @@ struct Hover: ButtonStyle {
         @State private var hover = false
         var body: some View {
             configuration.label
-                .scaleEffect(configuration.isPressed ? 0.88 : hover ? 1.12 : 1)
-                .brightness(hover ? 0.12 : 0)
+                .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(hover ? 0.18 : 0)).padding(-5))
+                .scaleEffect(configuration.isPressed ? 0.85 : hover ? 1.15 : 1)
                 .animation(.spring(response: 0.25, dampingFraction: 0.6), value: hover)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
                 .contentShape(Rectangle())
