@@ -27,10 +27,10 @@ EOF
 
 # mediaremote-adapter framework (loaded by /usr/bin/perl, not linked)
 clang -dynamiclib -O2 -arch arm64 -arch x86_64 -mmacosx-version-min=$MIN_OS -fobjc-arc -fvisibility=default -I$MRA/include -I$MRA/src \
-  $MRA/src/adapter/*.m $MRA/src/private/MediaRemote.m $MRA/src/utility/*.m \
+  $MRA/src/adapter/*.m $MRA/src/private/MediaRemote.m $MRA/src/utility/*.m island/island.m \
   -framework Foundation -framework AppKit -framework UniformTypeIdentifiers \
   -o $RES/MediaRemoteAdapter.framework/MediaRemoteAdapter
-cp $MRA/bin/mediaremote-adapter.pl $RES/
+cp $MRA/bin/mediaremote-adapter.pl island/island.pl $RES/
 [ -f AppIcon.icns ] || swift make-icon.swift
 cp AppIcon.icns $RES/
 codesign --force -s - $RES/MediaRemoteAdapter.framework/MediaRemoteAdapter

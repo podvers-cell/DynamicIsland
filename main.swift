@@ -15,15 +15,19 @@ struct Track: Equatable {
     }
 }
 
-// Now playing for every app (Spotify, Music, browsers...) via mediaremote-adapter.
-// MediaRemote reports only one app: the last one that claimed "now playing" (often a
-// browser tab). Spotify and Music are also read over AppleScript, so every open player
-// shows up as a source the user can switch to from the island.
+// Now playing for every app (Spotify, Music, browsers...).
+// - `elected`: mediaremote-adapter stream, the one app macOS routes media commands to (has artwork).
+// - `sessions`: island.pl, every app with a now playing session, like Control Center lists.
+// - `scripted`: Spotify/Music over AppleScript, for artwork and for controlling them when
+//   they are not the elected app (MediaRemote redirects every command to the elected app).
 final class Player: ObservableObject {
     @Published private(set) var track: Track?
     @Published private(set) var sources: [Track] = []
-    private var remote: Track? { didSet { pick() } }
+    private var remote: Track? { didSet { pick() } }  // elected app
+    private var sessions: [Track] = [] { didSet { pick() } }
     private var scripted: [Track] = [] { didSet { pick() } }
+    private var arts: [String: (title: String, image: NSImage)] = [:]  // bundle -> last seen artwork
+    private var sessionsPending = Data()
     private var selected: String?  // bundle the user picked; nil = follow whatever plays
     private let res = Bundle.main.resourcePath ?? "."
     private var proc: Process?
@@ -57,12 +61,19 @@ final class Player: ObservableObject {
 
     init() {
         start()
+        startSessions()
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.poll() }
     }
 
     private func pick() {
-        // If MediaRemote already tracks Spotify/Music, keep its richer copy and drop the AppleScript one.
-        let list = (remote.map { [$0] } ?? []) + scripted.filter { $0.bundle != remote?.bundle }
+        for t in [remote].compactMap({ $0 }) + scripted { if let img = t.art { arts[t.bundle] = (t.title, img) } }
+        // Elected app first (richest data), then the other sessions, then Spotify/Music not known to MediaRemote.
+        var list = remote.map { [$0] } ?? []
+        for var t in sessions + scripted where !list.contains(where: { $0.bundle == t.bundle }) {
+            if let sc = scripted.first(where: { $0.bundle == t.bundle }) { t = sc }
+            if t.art == nil, let a = arts[t.bundle], a.title == t.title { t.art = a.image }
+            list.append(t)
+        }
         sources = list
         let playing = list.first { $0.playing }
         if let sel = list.first(where: { $0.bundle == selected }), sel.playing || playing == nil {
@@ -113,6 +124,38 @@ final class Player: ObservableObject {
         return t
     }
 
+    private func startSessions() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        p.arguments = ["\(res)/island.pl", "\(res)/MediaRemoteAdapter.framework", "sessions"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in self?.consumeSessions(h.availableData) }
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.startSessions() }
+        }
+        try? p.run()
+    }
+
+    private func consumeSessions(_ data: Data) {
+        sessionsPending.append(data)
+        while let nl = sessionsPending.firstIndex(of: 0x0A) {
+            let line = sessionsPending[sessionsPending.startIndex..<nl]
+            sessionsPending = Data(sessionsPending[(nl + 1)...])
+            guard let rows = try? JSONSerialization.jsonObject(with: line) as? [[String: Any]] else { continue }
+            let list = rows.compactMap { r -> Track? in
+                guard let b = r["bundle"] as? String, let title = r["title"] as? String else { return nil }
+                var t = Track(bundle: b, title: title, artist: r["artist"] as? String ?? "", playing: r["playing"] as? Bool ?? false)
+                t.duration = r["duration"] as? Double ?? 0
+                t.elapsed = r["elapsed"] as? Double ?? 0
+                if let ts = r["timestamp"] as? Double { t.stamp = Date(timeIntervalSince1970: ts) }
+                if let b64 = r["artwork"] as? String, let d = Data(base64Encoded: b64) { t.art = NSImage(data: d) }
+                return t
+            }
+            DispatchQueue.main.async { if self.sessions != list { self.sessions = list } }
+        }
+    }
+
     private func poll() {
         guard !polling else { return }  // previous poll still running (e.g. waiting on a permission prompt)
         polling = true
@@ -146,30 +189,46 @@ final class Player: ObservableObject {
         actionQueue.async { NSAppleScript(source: "tell application \"\(app)\" to \(cmd)")?.executeAndReturnError(nil) }
     }
 
+    private static let browsers = ["com.google.Chrome": "Google Chrome", "com.brave.Browser": "Brave Browser",
+                                   "com.microsoft.edgemac": "Microsoft Edge", "com.apple.Safari": "Safari"]
+
     // MediaRemote command ids: 0 = play, 1 = pause, 2 = toggle, 4 = next, 5 = previous
     private func command(_ t: Track, _ id: Int) {
-        if let app = t.scriptApp {
-            tell(app, [0: "play", 1: "pause", 2: "playpause", 4: "next track", 5: "previous track"][id] ?? "playpause")
-        } else {
+        if t.bundle == remote?.bundle {
             try? adapter(["send", "\(id)"]).run()
+        } else if let app = t.scriptApp ?? (["com.spotify.client": "Spotify", "com.apple.Music": "Music"])[t.bundle] {
+            tell(app, [0: "play", 1: "pause", 2: "playpause", 4: "next track", 5: "previous track"][id] ?? "playpause")
+        } else if Self.browsers[t.bundle] != nil, let js = [0: "v.play()", 1: "v.pause()", 2: "v.paused ? v.play() : v.pause()"][id] {
+            // Not the elected app, so MediaRemote can't reach it: drive the tab's <video>/<audio> directly.
+            onTab(t, "execute javascript", "var v = document.querySelector('video, audio'); if (v) { \(js) }") { ok in
+                if !ok { self.open(t) }  // "Allow JavaScript from Apple Events" is off: open the tab instead
+            }
+        } else {
+            open(t)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.poll() }
     }
 
     func send(_ id: Int) { if let t = track { command(t, id) } }
 
-    // Bring the playing app to the front. For browsers, also jump to the tab whose title
-    // matches what is playing (needs Automation permission for that browser).
-    func reveal() {
-        guard let t = track, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: t.bundle) else { return }
-        let browsers = ["com.google.Chrome": "Google Chrome", "com.brave.Browser": "Brave Browser",
-                        "com.microsoft.edgemac": "Microsoft Edge", "com.apple.Safari": "Safari"]
-        // Bring the app up right away; re-opening a running app also restores minimized windows.
-        NSWorkspace.shared.openApplication(at: url, configuration: .init())
-        guard let app = browsers[t.bundle] else { return }
-        let title = String(t.title.prefix(40)).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let pickTab = app == "Safari" ? "set current tab of w to tb" : "set active tab index of w to i"
-        let restore = app == "Safari" ? "set miniaturized of w to false" : "set minimized of w to false"
+    // Runs `action` on the browser tab whose title matches the track. Chrome-family uses
+    // "execute tab javascript ...", Safari "do JavaScript ... in tab"; "select" brings the tab up.
+    private func onTab(_ t: Track, _ action: String, _ js: String = "", done: ((Bool) -> Void)? = nil) {
+        guard let app = Self.browsers[t.bundle] else { done?(false); return }
+        let esc = { (s: String) in s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") }
+        let title = esc(String(t.title.prefix(40)))
+        let safari = app == "Safari"
+        let body: String
+        if action == "select" {
+            body = """
+            \(safari ? "set miniaturized of w to false" : "set minimized of w to false")
+            \(safari ? "set current tab of w to tb" : "set active tab index of w to i")
+            set index of w to 1
+            activate
+            """
+        } else {
+            body = safari ? "do JavaScript \"\(esc(js))\" in tb" : "execute tb javascript \"\(esc(js))\""
+        }
         let src = """
         tell application "\(app)"
           repeat with w in windows
@@ -177,18 +236,29 @@ final class Player: ObservableObject {
             repeat with tb in tabs of w
               set i to i + 1
               if name of tb contains "\(title)" then
-                \(pickTab)
-                \(restore)
-                set index of w to 1
-                activate
-                return
+                \(body)
+                return "ok"
               end if
             end repeat
           end repeat
-          activate
+          return "none"
         end tell
         """
-        actionQueue.async { NSAppleScript(source: src)?.executeAndReturnError(nil) }
+        actionQueue.async {
+            var err: NSDictionary?
+            let r = NSAppleScript(source: src)?.executeAndReturnError(&err).stringValue
+            DispatchQueue.main.async { done?(err == nil && r == "ok") }
+        }
+    }
+
+    // Bring the playing app to the front; for browsers, the tab that plays (needs Automation permission).
+    func reveal() { if let t = track { open(t) } }
+
+    private func open(_ t: Track) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: t.bundle) else { return }
+        // Bring the app up right away; re-opening a running app also restores minimized windows.
+        NSWorkspace.shared.openApplication(at: url, configuration: .init())
+        onTab(t, "select")
     }
 
     // Switch from the island: pause whatever else plays, play the picked source.
@@ -201,10 +271,13 @@ final class Player: ObservableObject {
     }
 
     func seek(to seconds: Double) {
-        if let app = track?.scriptApp {
+        guard let t = track else { return }
+        if t.bundle == remote?.bundle {
+            try? adapter(["seek", "\(Int(seconds * 1e6))"]).run()
+        } else if let app = t.scriptApp {
             tell(app, "set player position to \(seconds)")
         } else {
-            try? adapter(["seek", "\(Int(seconds * 1e6))"]).run()
+            onTab(t, "execute javascript", "var v = document.querySelector('video, audio'); if (v) v.currentTime = \(seconds)")
         }
         track?.elapsed = seconds  // move the bar now; the next update confirms
         track?.stamp = Date()
