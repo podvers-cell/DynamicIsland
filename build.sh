@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 APP=DynamicIsland.app
 MRA=vendor/mediaremote-adapter
 RES=$APP/Contents/Resources
-VERSION=1.1
+VERSION=1.2
 MIN_OS=14.2  # Core Audio process taps need 14.2
 mkdir -p $APP/Contents/MacOS $RES/MediaRemoteAdapter.framework
 cat > $APP/Contents/Info.plist <<EOF
