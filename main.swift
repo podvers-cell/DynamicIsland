@@ -150,6 +150,38 @@ final class Player: ObservableObject {
 
     func send(_ id: Int) { if let t = track { command(t, id) } }
 
+    // Bring the playing app to the front. For browsers, also jump to the tab whose title
+    // matches what is playing (needs Automation permission for that browser).
+    func reveal() {
+        guard let t = track, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: t.bundle) else { return }
+        let browsers = ["com.google.Chrome": "Google Chrome", "com.brave.Browser": "Brave Browser",
+                        "com.microsoft.edgemac": "Microsoft Edge", "com.apple.Safari": "Safari"]
+        guard let app = browsers[t.bundle] else {
+            NSWorkspace.shared.openApplication(at: url, configuration: .init())
+            return
+        }
+        let title = String(t.title.prefix(40)).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let pickTab = app == "Safari" ? "set current tab of w to tb" : "set active tab index of w to i"
+        let src = """
+        tell application "\(app)"
+          repeat with w in windows
+            set i to 0
+            repeat with tb in tabs of w
+              set i to i + 1
+              if name of tb contains "\(title)" then
+                \(pickTab)
+                set index of w to 1
+                activate
+                return
+              end if
+            end repeat
+          end repeat
+          activate
+        end tell
+        """
+        scriptQueue.async { NSAppleScript(source: src)?.executeAndReturnError(nil) }
+    }
+
     // Switch from the island: pause whatever else plays, play the picked source.
     func switchTo(_ bundle: String) {
         guard let target = sources.first(where: { $0.bundle == bundle }) else { return }
@@ -299,6 +331,7 @@ struct Bars: View {
 struct Artwork: View {
     let track: Track
     let size: CGFloat
+    var onTap: () -> Void = {}
     var body: some View {
         Image(nsImage: track.art ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: track.bundle)
             .map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage())
@@ -306,6 +339,7 @@ struct Artwork: View {
             .aspectRatio(contentMode: .fill)
             .frame(width: size, height: size)
             .clipShape(RoundedRectangle(cornerRadius: size / 4))
+            .onTapGesture(perform: onTap)
     }
 }
 
@@ -409,7 +443,7 @@ struct Island: View {
 
     func compact(_ t: Track) -> some View {
         HStack {
-            Artwork(track: t, size: 16)
+            Artwork(track: t, size: 16, onTap: player.reveal)
             Spacer()
             Bars(levels: levels, playing: t.playing)
         }
@@ -420,7 +454,7 @@ struct Island: View {
     func expanded(_ t: Track) -> some View {
         VStack(spacing: 9) {
             HStack(spacing: 10) {
-                Artwork(track: t, size: 42)
+                Artwork(track: t, size: 42, onTap: player.reveal)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(t.title).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(1)
                     Text(t.artist).font(.caption).foregroundStyle(.gray).lineLimit(1)
