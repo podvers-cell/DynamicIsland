@@ -6,6 +6,7 @@
 
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>
+#include <math.h>
 
 typedef void (^ClientsCB)(NSArray *clients);
 typedef void (^InfoCB)(NSDictionary *info, NSError *error);
@@ -35,6 +36,9 @@ static void load(void) {
     L(MRNowPlayingPlayerPathCreate); L(MRMediaRemoteGetNowPlayingInfoForPlayer);
     L(MRMediaRemoteGetPlaybackStateForPlayer); L(MRMediaRemoteSendCommandToPlayer);
 }
+
+// NSJSONSerialization throws on NaN/inf (live streams report NaN durations).
+static BOOL isFiniteNumber(id v) { return [v isKindOfClass:NSNumber.class] && isfinite([v doubleValue]); }
 
 static NSString *bundleOf(id client) {
     // Browser tabs and helpers report a child bundle; group them under the app.
@@ -83,9 +87,9 @@ void island_sessions(void) {
                 NSMutableDictionary *row = [@{@"bundle": bundle, @"title": title, @"playing": @(state == 1)} mutableCopy];
                 id v;
                 if ((v = info[@"kMRMediaRemoteNowPlayingInfoArtist"]) && [v isKindOfClass:NSString.class]) row[@"artist"] = v;
-                if ((v = info[@"kMRMediaRemoteNowPlayingInfoDuration"]) && [v isKindOfClass:NSNumber.class]) row[@"duration"] = v;
-                if ((v = info[@"kMRMediaRemoteNowPlayingInfoElapsedTime"]) && [v isKindOfClass:NSNumber.class]) row[@"elapsed"] = v;
-                if ((v = info[@"kMRMediaRemoteNowPlayingInfoTimestamp"]) && [v isKindOfClass:NSDate.class]) row[@"timestamp"] = @([v timeIntervalSince1970]);
+                if (isFiniteNumber(v = info[@"kMRMediaRemoteNowPlayingInfoDuration"])) row[@"duration"] = v;
+                if (isFiniteNumber(v = info[@"kMRMediaRemoteNowPlayingInfoElapsedTime"])) row[@"elapsed"] = v;
+                if ((v = info[@"kMRMediaRemoteNowPlayingInfoTimestamp"]) && [v isKindOfClass:NSDate.class]) row[@"timestamp"] = @(isfinite([v timeIntervalSince1970]) ? [v timeIntervalSince1970] : 0);
                 NSString *key = [NSString stringWithFormat:@"%@|%@", title, row[@"artist"] ?: @""];
                 NSData *art = info[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
                 if ([art isKindOfClass:NSData.class] && ![lastTrack[bundle] isEqual:key]) {

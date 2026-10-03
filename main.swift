@@ -32,6 +32,9 @@ final class Player: ObservableObject {
     private let res = Bundle.main.resourcePath ?? "."
     private var proc: Process?
     private var pending = Data()
+    // Pipe handlers fire on arbitrary threads, and a restarted process gets a new handler
+    // while the old one may still deliver its last chunk. Parse everything on one queue.
+    private let parseQueue = DispatchQueue(label: "parse")
     private let scriptQueue = DispatchQueue(label: "applescript")
     // Separate queue: a poll stuck on a pending permission prompt must not block user actions.
     private let actionQueue = DispatchQueue(label: "applescript-actions")
@@ -94,7 +97,11 @@ final class Player: ObservableObject {
         let p = adapter(["stream", "--no-diff", "--micros", "--debounce=100"])
         let pipe = Pipe()
         p.standardOutput = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in self?.consume(h.availableData) }
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            if d.isEmpty { h.readabilityHandler = nil; return }  // EOF
+            self?.parseQueue.async { self?.consume(d) }
+        }
         p.terminationHandler = { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.start() }
         }
@@ -130,7 +137,11 @@ final class Player: ObservableObject {
         p.arguments = ["\(res)/island.pl", "\(res)/MediaRemoteAdapter.framework", "sessions"]
         let pipe = Pipe()
         p.standardOutput = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in self?.consumeSessions(h.availableData) }
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            if d.isEmpty { h.readabilityHandler = nil; return }  // EOF
+            self?.parseQueue.async { self?.consumeSessions(d) }
+        }
         p.terminationHandler = { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.startSessions() }
         }
