@@ -429,18 +429,23 @@ struct Bars: View {
 struct Artwork: View {
     let track: Track
     let size: CGFloat
-    var onTap: () -> Void = {}
+    var onTap: (() -> Void)?  // nil: plain image, so clicks fall through to the island
     // A Button, not onTapGesture: tap gestures miss clicks in this non-activating panel.
     var body: some View {
-        Button(action: onTap) {
-            Image(nsImage: track.art ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: track.bundle)
-                .map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage())
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: size, height: size)
-                .clipShape(RoundedRectangle(cornerRadius: size / 4))
+        if let onTap {
+            Button(action: onTap) { image }.buttonStyle(Hover())
+        } else {
+            image
         }
-        .buttonStyle(Hover())
+    }
+
+    var image: some View {
+        Image(nsImage: track.art ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: track.bundle)
+            .map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage())
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size / 4))
     }
 }
 
@@ -527,10 +532,21 @@ struct Island: View {
                 .background(Color.black)
                 .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: 10, bottomTrailingRadius: 10))
             } else if let t = player.track {
-                Group { open ? AnyView(expanded(t)) : AnyView(compact(t)) }
+                let shape = UnevenRoundedRectangle(bottomLeadingRadius: open ? 22 : 10, bottomTrailingRadius: open ? 22 : 10)
+                // Opens only on a click inside the island's own shape; closes when the mouse leaves it.
+                Group {
+                    if open {
+                        expanded(t)
+                    } else {
+                        Button { withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { open = true } } label: {
+                            compact(t).contentShape(shape)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
                     .background(Color.black)
-                    .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: open ? 22 : 10, bottomTrailingRadius: open ? 22 : 10))
-                    .onHover { h in withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { open = h } }
+                    .clipShape(shape)
+                    .onHover { h in if !h && open { withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { open = false } } }
                     .contextMenu {
                         let login = SMAppService.mainApp
                         Button(login.status == .enabled ? "✓ Open at Login" : "Open at Login") {
@@ -546,7 +562,7 @@ struct Island: View {
 
     func compact(_ t: Track) -> some View {
         HStack {
-            Artwork(track: t, size: 16, onTap: player.reveal)
+            Artwork(track: t, size: 16)
             Spacer()
             Bars(levels: levels, playing: t.playing)
         }
