@@ -516,6 +516,9 @@ struct Island: View {
     let levels: Levels
     let notchW: CGFloat, notchH: CGFloat
     @State private var open = false
+    @State private var hovering = false
+    @State private var full = CGSize.zero  // expanded size, measured
+    static let snap = Animation.spring(response: 0.4, dampingFraction: 0.8)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -533,20 +536,46 @@ struct Island: View {
                 .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: 10, bottomTrailingRadius: 10))
             } else if let t = player.track {
                 let shape = UnevenRoundedRectangle(bottomLeadingRadius: open ? 22 : 10, bottomTrailingRadius: open ? 22 : 10)
+                // Both views stay laid out; only the island's frame animates between their sizes and the
+                // content cross-fades, so opening and closing grow and shrink smoothly instead of swapping.
                 // Opens only on a click inside the island's own shape; closes when the mouse leaves it.
-                Group {
-                    if open {
-                        expanded(t)
-                    } else {
-                        Button { withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { open = true } } label: {
-                            compact(t).contentShape(shape)
-                        }
-                        .buttonStyle(.plain)
+                ZStack(alignment: .top) {
+                    Button { withAnimation(Self.snap) { open = true } } label: {
+                        compact(t).contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .opacity(open ? 0 : 1)
+                    .allowsHitTesting(!open)
+                    expanded(t)
+                        .background(GeometryReader { g in
+                            Color.clear.onAppear { full = g.size }.onChange(of: g.size) { full = $1 }
+                        })
+                        .scaleEffect(open ? 1 : 0.92, anchor: .top)
+                        .opacity(open ? 1 : 0)
+                        .allowsHitTesting(open)
                 }
-                    .background(Color.black)
+                .fixedSize()
+                .frame(width: open ? full.width : notchW + 60, height: open ? full.height : notchH, alignment: .top)
+                    // Open: Liquid Glass, with a black band on top so it still melts into the notch.
+                    // Closed: solid black, like the notch itself.
+                    .background(alignment: .top) {
+                        LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: notchH + 16)
+                    }
+                    .background(Color.black.opacity(open ? 0 : 1))
+                    .modifier(Glass(shape: shape))
                     .clipShape(shape)
-                    .onHover { h in if !h && open { withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { open = false } } }
+                    .contentShape(shape)
+                    // Swapping compact for expanded sends a false "mouse left" right after the click,
+                    // which closed the island at once. Close only if the mouse is still out a moment later.
+                    .onHover { h in
+                        hovering = h
+                        if !h && open {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                if !hovering && open { withAnimation(Self.snap) { open = false } }
+                            }
+                        }
+                    }
                     .contextMenu {
                         let login = SMAppService.mainApp
                         Button(login.status == .enabled ? "✓ Open at Login" : "Open at Login") {
@@ -623,6 +652,18 @@ struct Island: View {
     }
 }
 
+// Liquid Glass on macOS 26+, dark blur material before that. Tinted dark so white text stays readable.
+struct Glass<S: Shape>: ViewModifier {
+    let shape: S
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            content.glassEffect(.regular.tint(.black.opacity(0.25)), in: shape)
+        } else {
+            content.background(.ultraThinMaterial, in: shape).environment(\.colorScheme, .dark)
+        }
+    }
+}
+
 // Grows on hover and shrinks on press, so every control in the island feels clickable.
 struct Hover: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { HoverBody(configuration: configuration) }
@@ -634,8 +675,8 @@ struct Hover: ButtonStyle {
             configuration.label
                 .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(hover ? 0.18 : 0)).padding(-5))
                 .scaleEffect(configuration.isPressed ? 0.85 : hover ? 1.15 : 1)
-                .animation(.spring(response: 0.25, dampingFraction: 0.6), value: hover)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
+                .animation(.spring(response: 0.18, dampingFraction: 0.7), value: hover)
+                .animation(.spring(response: 0.12, dampingFraction: 0.7), value: configuration.isPressed)
                 .contentShape(Rectangle())
                 .onHover { hover = $0 }
         }
